@@ -193,4 +193,43 @@ protected:
     _physical_address = physical_address;
   }
 };
+
+/**
+ * Abstract buffer class to create device only buffers
+ *
+ * @tparam dtype  The datatype of the host buffer.
+ */
+class DeviceOnlyBuffer : public BaseBuffer {
+public:
+  /**
+   * Construct a new Buffer object.
+   *
+   * @param length            The length of the device buffer.
+   * @param type              The datatype of the device buffer.
+   * @param physical_address  The location of the device buffer.
+   */
+  DeviceOnlyBuffer(size_t length, dataType type, addr_t physical_address)
+      : BaseBuffer(nullptr, length, type, physical_address), _length(length){};
+
+  /**
+   * Destroy the Buffer object
+   *
+   */
+  virtual ~DeviceOnlyBuffer() {}
+
+  /**
+   * Get the length of the device buffer.
+   *
+   * @return size_t  The length of the device buffer.
+   */
+  size_t length() const { return _length; }
+
+protected:
+  const size_t _length;
+
+  void update_buffer(addr_t physical_address) {
+    _byte_array = nullptr;
+    _physical_address = physical_address;
+  }
+};
 } // namespace ACCL
