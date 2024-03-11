@@ -819,6 +819,12 @@ public:
     }
   }
 
+  std::unique_ptr<DeviceOnlyBuffer> create_dev_buffer(xrt::bo &bo, size_t length,
+                                               dataType type) {
+      return std::unique_ptr<DeviceOnlyBuffer>(
+          new FPGAOnlyBuffer(bo, length, type));
+  }
+
   /**
    * Construct a new p2p buffer object.
    *

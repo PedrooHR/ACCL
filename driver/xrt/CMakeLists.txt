@@ -84,7 +84,7 @@ if (NOT EXISTS $ENV{XILINX_XRT})
 endif ()
 
 target_link_directories(accl PUBLIC $ENV{XILINX_XRT}/lib)
-target_link_libraries(accl PUBLIC xilinxopencl xrt_coreutil xrt_core)
+target_link_libraries(accl PUBLIC xrt_coreutil xrt_core)
 target_include_directories(accl PUBLIC $ENV{XILINX_XRT}/include)
 
 # ZMQ
