@@ -51,7 +51,7 @@ zmq_intf_context zmq_server_intf(unsigned int starting_port, unsigned int local_
     }
 
     // bind to the socket(s)
-    *logger << log_level::info << "Rank " << local_rank << " binding to " << cmd_endpoint << " (CMD) and " << eth_endpoints.at(local_rank) << " (ETH)" << endl;
+    *logger << log_level::verbose << "Rank " << local_rank << " binding to " << cmd_endpoint << " (CMD) and " << eth_endpoints.at(local_rank) << " (ETH)" << endl;
     ctx.cmd_socket->bind(cmd_endpoint);
     ctx.eth_tx_socket->bind(eth_endpoints.at(local_rank));
 
@@ -59,21 +59,25 @@ zmq_intf_context zmq_server_intf(unsigned int starting_port, unsigned int local_
 
     // connect to the sockets
     for(int i=0; i<world_size; i++){
-        *logger << log_level::info << "Rank " << local_rank << " connecting to " << eth_endpoints.at(i) << " (ETH)" << endl;
+        *logger << log_level::verbose << "Rank " << local_rank << " connecting to " << eth_endpoints.at(i) << " (ETH)" << endl;
         ctx.eth_rx_socket->connect(eth_endpoints.at(i));
     }
 
     this_thread::sleep_for(chrono::milliseconds(1000));
 
-    *logger << log_level::info << "Rank " << local_rank << " subscribing to " << local_rank << " (ETH)" << endl;
-    ctx.eth_rx_socket->subscribe(to_string(local_rank));
+    *logger << log_level::verbose << "Rank " << local_rank << " subscribing to " << local_rank << " (ETH)" << endl;
+    // Create a padded version of the rank to prevent subscription to
+    // ranks that have the same starting digits
+    std::stringstream rank_pad;
+    rank_pad << std::setw(DEST_PADDING) << std::setfill('0') << local_rank; 
+    ctx.eth_rx_socket->subscribe(rank_pad.str());
 
     this_thread::sleep_for(chrono::milliseconds(1000));
 
     //kernel interface
     //bind to tx socket
     string krnl_endpoint = endpoint_base + to_string(starting_port+2*world_size+local_rank);
-    *logger << log_level::info << "Rank " << local_rank << " binding to " << krnl_endpoint << " (KRNL)" << endl;
+    *logger << log_level::verbose << "Rank " << local_rank << " binding to " << krnl_endpoint << " (KRNL)" << endl;
     ctx.krnl_tx_socket->bind(krnl_endpoint);
     this_thread::sleep_for(chrono::milliseconds(1000));
     //connect to rx socket
@@ -81,11 +85,11 @@ zmq_intf_context zmq_server_intf(unsigned int starting_port, unsigned int local_
     if(!kernel_loopback){
         krnl_endpoint = endpoint_base + to_string(starting_port+3*world_size+local_rank);
     }
-    *logger << log_level::info << "Rank " << local_rank << " connecting to " << krnl_endpoint << " (KRNL)" << endl;
+    *logger << log_level::verbose << "Rank " << local_rank << " connecting to " << krnl_endpoint << " (KRNL)" << endl;
     ctx.krnl_rx_socket->connect(krnl_endpoint);
     this_thread::sleep_for(chrono::milliseconds(1000));
     //subscribing to all (for now)
-    *logger << log_level::info << "Rank " << local_rank << " subscribing to all (KRNL)" << endl;
+    *logger << log_level::verbose << "Rank " << local_rank << " subscribing to all (KRNL)" << endl;
     ctx.krnl_rx_socket->subscribe("");
     this_thread::sleep_for(chrono::milliseconds(1000));
 
@@ -94,7 +98,7 @@ zmq_intf_context zmq_server_intf(unsigned int starting_port, unsigned int local_
     return ctx;
 }
 
-void eth_endpoint_egress_port(zmq_intf_context *ctx, Stream<stream_word > &in, unsigned int local_rank, bool remap_dest){
+void eth_endpoint_egress_port(zmq_intf_context *ctx, Stream<stream_word > &in, unsigned int local_rank){
 
     zmqpp::message message;
     Json::Value packet;
@@ -116,18 +120,12 @@ void eth_endpoint_egress_port(zmq_intf_context *ctx, Stream<stream_word > &in, u
         }
     }while(tmp.last == 0);
     dest = tmp.dest;
-    //do a bit of dest translation, because
-    //dest is actually a local session number, and sessions are allocated
-    //sequentially to ranks, skipping the local rank
-    //therefore ranks  0, 1, ... , local_rank, local_rank+1, ... , N-2, N-1
-    //map to sesssions 0, 1, ... ,        N/A, local_rank  , ... , N-3, N-2
-    if(remap_dest){
-        if(dest >= local_rank){
-            dest++;
-        }
-    }
+    // Create a padded version of he destitnation port ID to ensure unique string
+    // for each rank
+    std::stringstream dest_pad;
+    dest_pad << std::setw(DEST_PADDING) << std::setfill('0') << dest; 
     //first part of the message is the destination port ID
-    message << to_string(dest);
+    message << dest_pad.str();
     //second part of the message is the local rank of the sender
     message << to_string(local_rank);
     //finally package the data
@@ -267,7 +265,7 @@ void krnl_endpoint_ingress_port(zmq_intf_context *ctx, Stream<stream_word > &out
 
 }
 
-void serve_zmq(zmq_intf_context *ctx, uint32_t *cfgmem, vector<char> &devicemem, Stream<command_word> cmd[NUM_CTRL_STREAMS], Stream<command_word> sts[NUM_CTRL_STREAMS]){
+void serve_zmq(zmq_intf_context *ctx, uint32_t *cfgmem, vector<char> &devicemem, vector<char> &hostmem, Stream<command_word> cmd[NUM_CTRL_STREAMS], Stream<command_word> sts[NUM_CTRL_STREAMS]){
 
     Json::Reader reader;
     Json::StreamWriterBuilder builder;
@@ -290,6 +288,7 @@ void serve_zmq(zmq_intf_context *ctx, uint32_t *cfgmem, vector<char> &devicemem,
     Json::Value response;
     response["status"] = 0;
     int adr, val, len;
+    bool host;
     uint64_t dma_addr;
     Json::Value dma_wdata;
     unsigned int ctrl_id;
@@ -299,7 +298,7 @@ void serve_zmq(zmq_intf_context *ctx, uint32_t *cfgmem, vector<char> &devicemem,
         // MMIO read response {"status": OK|ERR, "rdata": <uint>}
         case 0:
             adr = request["addr"].asUInt();
-            *logger << log_level::info << "MMIO read " << adr << endl;
+            *logger << log_level::debug << "MMIO read " << adr << endl;
 
             if(adr >= END_OF_EXCHMEM){
                 response["status"] = 1;
@@ -312,58 +311,90 @@ void serve_zmq(zmq_intf_context *ctx, uint32_t *cfgmem, vector<char> &devicemem,
         // MMIO write response {"status": OK|ERR}
         case 1:
             adr = request["addr"].asUInt();
-            *logger << log_level::info << "MMIO write " << adr << endl;
+            *logger << log_level::debug << "MMIO write " << adr << endl;
             if(adr >= END_OF_EXCHMEM){
                 response["status"] = 1;
             } else {
                 cfgmem[adr/4] = request["wdata"].asUInt();
             }
             break;
-        // Devicemem read request  {"type": 2, "addr": <uint>, "len": <uint>}
+        // Devicemem read request  {"type": 2, "addr": <uint>, "len": <uint>, "host": <bool>}
         // Devicemem read response {"status": OK|ERR, "rdata": <array of uint>}
         case 2:
             adr = request["addr"].asUInt();
             len = request["len"].asUInt();
-            *logger << log_level::info << "Mem read " << adr << " len: " << len << endl;
-            if((adr+len) > devicemem.size()){
-                response["status"] = 1;
-                response["rdata"][0] = 0;
+            host = request["host"].asUInt();
+            *logger << log_level::debug << (host ? "Host " : "Device ") << " mem read " << adr << " len: " << len << endl;
+            if(host){
+                if((adr+len) > hostmem.size()){
+                    response["status"] = 1;
+                    response["rdata"][0] = 0;
+                    *logger << log_level::error << "Host mem read outside allocated range ("<< hostmem.size()/1024 << "KB) at addr: " << adr << " len: " << len << endl;
+                } else {
+                    for (int i=0; i<len; i++)
+                    {
+                        response["rdata"][i] = hostmem.at(adr+i);
+                    }
+                }
             } else {
-                for (int i=0; i<len; i++)
-                {
-                    response["rdata"][i] = devicemem.at(adr+i);
+                if((adr+len) > devicemem.size()){
+                    response["status"] = 1;
+                    response["rdata"][0] = 0;
+                    *logger << log_level::error << "Device mem read outside allocated range ("<< devicemem.size()/1024 << "KB) at addr: " << adr << " len: " << len << endl;
+                } else {
+                    for (int i=0; i<len; i++)
+                    {
+                        response["rdata"][i] = devicemem.at(adr+i);
+                    }
                 }
             }
             break;
-        // Devicemem write request  {"type": 3, "addr": <uint>, "wdata": <array of uint>}
+        // Devicemem write request  {"type": 3, "addr": <uint>, "wdata": <array of uint>, "host": <bool>}
         // Devicemem write response {"status": OK|ERR}
         case 3:
             adr = request["addr"].asUInt();
             dma_wdata = request["wdata"];
             len = dma_wdata.size();
-            *logger << log_level::info << "Mem write " << adr << " len: " << len << endl;
-            if((adr+len) > devicemem.size()){
-                devicemem.resize(adr+len);
-            }
-            for(int i=0; i<len; i++){
-                devicemem.at(adr+i) = dma_wdata[i].asUInt();
+            host = request["host"].asUInt();
+            *logger << log_level::debug << (host ? "Host " : "Device ") << " mem write " << adr << " len: " << len << endl;
+            if(host){
+                if((adr+len) > hostmem.size()){
+                    hostmem.resize(adr+len);
+                }
+                for(int i=0; i<len; i++){
+                    hostmem.at(adr+i) = dma_wdata[i].asUInt();
+                }
+            } else {
+                if((adr+len) > devicemem.size()){
+                    devicemem.resize(adr+len);
+                }
+                for(int i=0; i<len; i++){
+                    devicemem.at(adr+i) = dma_wdata[i].asUInt();
+                }
             }
             break;
-        // Devicemem allocate request  {"type": 4, "addr": <uint>, "len": <uint>}
+        // Devicemem allocate request  {"type": 4, "addr": <uint>, "len": <uint>, "host": <bool>}
         // Devicemem allocate response {"status": OK|ERR}
         case 4:
             adr = request["addr"].asUInt();
             len = request["len"].asUInt();
-            *logger << log_level::info << "Mem allocate " << adr << " len: " << len << endl;
-            if((adr+len) > devicemem.size()){
-                devicemem.resize(adr+len);
+            host = request["host"].asUInt();
+            *logger << log_level::debug << (host ? "Host " : "Device ") << " mem allocate " << adr << " len: " << len << endl;
+            if(host){
+                if((adr+len) > hostmem.size()){
+                    hostmem.resize(adr+len);
+                }
+            } else {
+                if((adr+len) > devicemem.size()){
+                    devicemem.resize(adr+len);
+                }
             }
             break;
         // Call request  {"type": 5, arg names and values}
         // Call response {"status": OK|ERR}
         case 5:
             ctrl_id = request["ctrl_id"].asUInt();
-            *logger << log_level::info << "Call with scenario " << request["scenario"].asUInt() << " on controller " << ctrl_id << endl;
+            *logger << log_level::verbose << "Call with scenario " << request["scenario"].asUInt() << " on controller " << ctrl_id << endl;
             if(ctrl_id >= NUM_CTRL_STREAMS){
                 response["status"] = -1;
             } else{
@@ -416,8 +447,8 @@ void serve_zmq(zmq_intf_context *ctx, uint32_t *cfgmem, vector<char> &devicemem,
 void serve_zmq(zmq_intf_context *ctx,
                 Stream<unsigned int> &axilite_rd_addr, Stream<unsigned int> &axilite_rd_data,
                 Stream<unsigned int> &axilite_wr_addr, Stream<unsigned int> &axilite_wr_data,
-                Stream<ap_uint<64> > &aximm_rd_addr, Stream<ap_uint<512> > &aximm_rd_data,
-                Stream<ap_uint<64> > &aximm_wr_addr, Stream<ap_uint<512> > &aximm_wr_data, Stream<ap_uint<64> > &aximm_wr_strb,
+                Stream<ap_uint<64> > &aximm_rd_addr, Stream<ap_uint<32> > &aximm_rd_len, Stream<ap_uint<512> > &aximm_rd_data,
+                Stream<ap_uint<64> > &aximm_wr_addr, Stream<ap_uint<32> > &aximm_wr_len, Stream<ap_uint<512> > &aximm_wr_data, Stream<ap_uint<64> > &aximm_wr_strb,
                 Stream<unsigned int> &callreq, Stream<unsigned int> &callack){
 
     Json::Reader reader;
@@ -441,6 +472,7 @@ void serve_zmq(zmq_intf_context *ctx,
     Json::Value response;
     response["status"] = 0;
     int adr, val, len;
+    bool host;
     uint64_t dma_addr;
     Json::Value dma_wdata;
     ap_uint<64> mem_addr;
@@ -454,7 +486,7 @@ void serve_zmq(zmq_intf_context *ctx,
         // MMIO read response {"status": OK|ERR, "rdata": <uint>}
         case 0:
             adr = request["addr"].asUInt();
-            *logger << log_level::info << "MMIO read " << adr << endl;
+            *logger << log_level::debug << "MMIO read " << adr << endl;
             if(adr >= END_OF_EXCHMEM){
                 response["status"] = 1;
                 response["rdata"] = 0;
@@ -474,7 +506,7 @@ void serve_zmq(zmq_intf_context *ctx,
         // MMIO write response {"status": OK|ERR}
         case 1:
             adr = request["addr"].asUInt();
-            *logger << log_level::info << "MMIO write " << adr << endl;
+            *logger << log_level::debug << "MMIO write " << adr << endl;
             if(adr >= END_OF_EXCHMEM){
                 response["status"] = 1;
             } else {
@@ -489,55 +521,57 @@ void serve_zmq(zmq_intf_context *ctx,
                 }
             }
             break;
-        // Devicemem read request  {"type": 2, "addr": <uint>, "len": <uint>}
+        // Devicemem read request  {"type": 2, "addr": <uint>, "len": <uint>, "host": <bool>}
         // Devicemem read response {"status": OK|ERR, "rdata": <array of uint>}
         case 2:
             adr = request["addr"].asUInt();
             len = request["len"].asUInt();
-            *logger << log_level::info << "Mem read " << adr << " len: " << len << endl;
-            if((adr+len) > ACCL_SIM_MEM_SIZE_KB*1024){
+            host = request["host"].asUInt();
+            *logger << log_level::debug << "Mem read " << adr << " len: " << len << endl;
+            if((adr+len) > (host ? 1 : ACCL_SIM_NUM_BANKS)*ACCL_SIM_MEM_SIZE_KB*1024){
                 response["status"] = 1;
                 response["rdata"][0] = 0;
                 *logger << log_level::error << "Mem read outside available range ("<< ACCL_SIM_MEM_SIZE_KB << "KB) at addr: " << adr << " len: " << len << endl;
             } else {
-                for(int i=0; i<len; i+=64){
-                    mem_addr = adr+i;
-                    aximm_rd_addr.Push(mem_addr);
-                    while(!ctx->stop){
-                        if(!aximm_rd_data.IsEmpty()){
-                            mem_data = aximm_rd_data.Pop();
-                            break;
-                        } else{
-                            this_thread::sleep_for(chrono::milliseconds(1));
+                adr += host ? ACCL_SIM_NUM_BANKS*ACCL_SIM_MEM_SIZE_KB*1024 : 0;
+                aximm_rd_addr.Push(adr);
+                aximm_rd_len.Push(len);
+                unsigned int idx = 0;
+                while(!ctx->stop && len>idx){
+                    if(!aximm_rd_data.IsEmpty()){
+                        mem_data = aximm_rd_data.Pop();
+                        for(int j=0; j<64 && len>idx; j++, idx++){
+                            response["rdata"][idx] = (unsigned int)mem_data(8*(j+1)-1, 8*j);
                         }
-                    }
-                    for(int j=0; j<64 && (i+j)<len; j++){
-                        response["rdata"][i+j] = (unsigned int)mem_data(8*(j+1)-1, 8*j);
+                    } else{
+                        this_thread::sleep_for(chrono::milliseconds(1));
                     }
                 }
             }
             break;
-        // Devicemem write request  {"type": 3, "addr": <uint>, "wdata": <array of uint>}
+        // Devicemem write request  {"type": 3, "addr": <uint>, "wdata": <array of uint>, "host": <bool>}
         // Devicemem write response {"status": OK|ERR}
         case 3:
             adr = request["addr"].asUInt();
             dma_wdata = request["wdata"];
             len = dma_wdata.size();
-            *logger << log_level::info << "Mem write " << adr << " len: " << len << endl;
-            if((adr+len) > ACCL_SIM_MEM_SIZE_KB*1024){
+            host = request["host"].asUInt();
+            *logger << log_level::debug << "Mem write " << adr << " len: " << len << endl;
+            if((adr+len) > (host ? 1 : ACCL_SIM_NUM_BANKS)*ACCL_SIM_MEM_SIZE_KB*1024){
                 response["status"] = 1;
                 *logger << log_level::error << "Mem write outside available range ("<< ACCL_SIM_MEM_SIZE_KB << "KB) at addr: " << adr << " len: " << len << endl;
             } else{
+                adr += host ? ACCL_SIM_NUM_BANKS*ACCL_SIM_MEM_SIZE_KB*1024 : 0;
+                aximm_wr_addr.Push(adr);
+                aximm_wr_len.Push(len);
                 for(int i=0; i<len; i+=64){
                     mem_strb = 0;
-                    mem_addr = adr+i;
                     for(int j=0; j<64 && (i+j)<len; j++){
                         mem_data(8*(j+1)-1, 8*j) = dma_wdata[i+j].asUInt();
                         mem_strb(j,j) = 1;
                     }
                     while(!ctx->stop){
-                        if(!aximm_wr_addr.IsFull() && !aximm_wr_data.IsFull() && !aximm_wr_strb.IsFull()){
-                            aximm_wr_addr.Push(mem_addr);
+                        if(!aximm_wr_data.IsFull() && !aximm_wr_strb.IsFull()){
                             aximm_wr_data.Push(mem_data);
                             aximm_wr_strb.Push(mem_strb);
                             break;
@@ -548,13 +582,14 @@ void serve_zmq(zmq_intf_context *ctx,
                 }
             }
             break;
-        // Devicemem allocate request  {"type": 4, "addr": <uint>, "len": <uint>}
+        // Devicemem allocate request  {"type": 4, "addr": <uint>, "len": <uint>, "host": <bool>}
         // Devicemem allocate response {"status": OK|ERR}
         case 4:
             adr = request["addr"].asUInt();
             len = request["len"].asUInt();
-            *logger << log_level::info << "Mem allocate " << adr << " len: " << len << endl;
-            if((adr+len) > ACCL_SIM_MEM_SIZE_KB*1024){
+            host = request["host"].asUInt();
+            *logger << log_level::debug << (host ? "Host " : "Device ") << " mem allocate " << adr << " len: " << len << endl;
+            if((adr+len) > (host ? 1 : ACCL_SIM_NUM_BANKS)*ACCL_SIM_MEM_SIZE_KB*1024){
                 response["status"] = 1;
                 *logger << log_level::error << "Mem allocate outside available range ("<< ACCL_SIM_MEM_SIZE_KB << "KB) at addr: " << adr << " len: " << len << endl;
             }
@@ -563,7 +598,7 @@ void serve_zmq(zmq_intf_context *ctx,
         // Call start response {"status": OK|ERR}
         case 5:
             ctrl_id = request["ctrl_id"].asUInt();
-            *logger << log_level::info << "Call with scenario " << request["scenario"].asUInt() << " on control stream " << ctrl_id << endl;
+            *logger << log_level::verbose << "Call with scenario " << request["scenario"].asUInt() << " on control stream " << ctrl_id << endl;
             if(ctrl_id >= NUM_CTRL_STREAMS){
                 response["status"] = -1;
             }else if(ctrl_id < 2){
@@ -683,55 +718,55 @@ void serve_zmq(zmq_intf_context *ctx,
 void zmq_cmd_server(zmq_intf_context *ctx,
                 Stream<unsigned int> &axilite_rd_addr, Stream<unsigned int> &axilite_rd_data,
                 Stream<unsigned int> &axilite_wr_addr, Stream<unsigned int> &axilite_wr_data,
-                Stream<ap_uint<64> > &aximm_rd_addr, Stream<ap_uint<512> > &aximm_rd_data,
-                Stream<ap_uint<64> > &aximm_wr_addr, Stream<ap_uint<512> > &aximm_wr_data, Stream<ap_uint<64> > &aximm_wr_strb,
+                Stream<ap_uint<64> > &aximm_rd_addr, Stream<ap_uint<32> > &aximm_rd_len, Stream<ap_uint<512> > &aximm_rd_data,
+                Stream<ap_uint<64> > &aximm_wr_addr, Stream<ap_uint<32> > &aximm_wr_len, Stream<ap_uint<512> > &aximm_wr_data, Stream<ap_uint<64> > &aximm_wr_strb,
                 Stream<unsigned int> &callreq, Stream<unsigned int> &callack){
-    (*logger)("Starting ZMQ server\n", log_level::info);
+    (*logger)("Starting ZMQ server\n", log_level::verbose);
     while(!ctx->stop){
         serve_zmq(ctx,
             axilite_rd_addr, axilite_rd_data,
             axilite_wr_addr, axilite_wr_data,
-            aximm_rd_addr, aximm_rd_data,
-            aximm_wr_addr, aximm_wr_data, aximm_wr_strb,
+            aximm_rd_addr, aximm_rd_len, aximm_rd_data,
+            aximm_wr_addr, aximm_wr_len, aximm_wr_data, aximm_wr_strb,
             callreq, callack
         );
         this_thread::sleep_for(chrono::milliseconds(10));
     }
-    (*logger)("Exiting ZMQ server\n", log_level::info);
+    (*logger)("Exiting ZMQ server\n", log_level::verbose);
 }
 
-void zmq_eth_egress_server(zmq_intf_context *ctx, Stream<stream_word > &in, unsigned int local_rank, bool remap_dest){
-    (*logger)("Starting ZMQ Eth Egress server\n", log_level::info);
+void zmq_eth_egress_server(zmq_intf_context *ctx, Stream<stream_word > &in, unsigned int local_rank){
+    (*logger)("Starting ZMQ Eth Egress server\n", log_level::verbose);
     while(!ctx->stop){
-        eth_endpoint_egress_port(ctx, in, local_rank, remap_dest);
+        eth_endpoint_egress_port(ctx, in, local_rank);
         this_thread::sleep_for(chrono::milliseconds(10));
     }
-    (*logger)("Exiting ZMQ Eth Egress server\n", log_level::info);
+    (*logger)("Exiting ZMQ Eth Egress server\n", log_level::verbose);
 }
 
 void zmq_eth_ingress_server(zmq_intf_context *ctx, Stream<stream_word > &out){
-    (*logger)("Starting ZMQ Eth Ingress server\n", log_level::info);
+    (*logger)("Starting ZMQ Eth Ingress server\n", log_level::verbose);
     while(!ctx->stop){
         eth_endpoint_ingress_port(ctx, out);
         this_thread::sleep_for(chrono::milliseconds(10));
     }
-    (*logger)("Exiting ZMQ Eth Ingress server\n", log_level::info);
+    (*logger)("Exiting ZMQ Eth Ingress server\n", log_level::verbose);
 }
 
 void zmq_krnl_egress_server(zmq_intf_context *ctx, Stream<stream_word > &in){
-    (*logger)("Starting ZMQ Streaming Kernel Egress server\n", log_level::info);
+    (*logger)("Starting ZMQ Streaming Kernel Egress server\n", log_level::verbose);
     while(!ctx->stop){
         krnl_endpoint_egress_port(ctx, in);
         this_thread::sleep_for(chrono::milliseconds(10));
     }
-    (*logger)("Exiting ZMQ Streaming Kernel Egress server\n", log_level::info);
+    (*logger)("Exiting ZMQ Streaming Kernel Egress server\n", log_level::verbose);
 }
 
 void zmq_krnl_ingress_server(zmq_intf_context *ctx, Stream<stream_word > &out){
-    (*logger)("Starting ZMQ Streaming Kernel Ingress server\n", log_level::info);
+    (*logger)("Starting ZMQ Streaming Kernel Ingress server\n", log_level::verbose);
     while(!ctx->stop){
         krnl_endpoint_ingress_port(ctx, out);
         this_thread::sleep_for(chrono::milliseconds(10));
     }
-    (*logger)("Exiting ZMQ Streaming Kernel Ingress server\n", log_level::info);
+    (*logger)("Exiting ZMQ Streaming Kernel Ingress server\n", log_level::verbose);
 }

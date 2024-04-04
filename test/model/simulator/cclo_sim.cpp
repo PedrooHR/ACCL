@@ -94,23 +94,54 @@ void control_read_fsm(XSI_DUT *dut, Stream<unsigned int> &addr, Stream<unsigned 
     }
 }
 
-void data_read_fsm(XSI_DUT *dut, Stream<ap_uint<64> > &addr, Stream<ap_uint<512> > &ret){
+void data_read_fsm(XSI_DUT *dut, Stream<ap_uint<64> > &addr, Stream<ap_uint<32> > &len, Stream<ap_uint<512> > &ret){
     static axi_fsm_state state = VALID_ADDR;
+    static ap_uint<64> curr_addr = 0;
+    static unsigned int curr_nbytes = 0;
+    static ap_uint<8> nbeats = 0;
+    unsigned int nbytes_to_4k_boundary, nbytes_this_transfer;
     switch(state){
         case VALID_ADDR:
-            //set up bus to transfer one 64-byte word at a time
-            dut->write(datamem.arsize(), 6);//64B
-            dut->write(datamem.arlen(), 0);//one word
-            dut->write(datamem.arburst(), 1);//INCR
             if(!addr.IsEmpty()){
-                dut->write<64>(datamem.araddr(), addr.Pop());
+                curr_addr = addr.Pop();
+                curr_nbytes = len.Pop();
+                nbytes_to_4k_boundary = (curr_addr/4096+1)*4096 - curr_addr;
+                nbytes_this_transfer = std::min(nbytes_to_4k_boundary, curr_nbytes);
+                nbeats = (nbytes_this_transfer+63)/64;//number of 64B beats in transfer
+                logger << log_level::debug << "Read start addr=" << curr_addr << " len=" << nbytes_this_transfer << " (" << nbeats << ")" << endl;
+                //set up bus to transfer one 64-byte word at a time
+                dut->write(datamem.arsize(), 6);//64B
+                dut->write(datamem.arlen(), nbeats-1);
+                dut->write(datamem.arburst(), 1);//INCR
+                dut->write<64>(datamem.araddr(), curr_addr);
                 dut->set(datamem.arvalid());
                 if(dut->test(datamem.arready())){
                     state = CLEAR_ADDR;
                 } else {
                     state = READY_ADDR;
                 }
+                curr_addr += nbytes_this_transfer;
+                curr_nbytes -= nbytes_this_transfer;
             }
+            return;
+        case CONTINUE_ADDR:
+            nbytes_to_4k_boundary = (curr_addr/4096+1)*4096 - curr_addr;
+            nbytes_this_transfer = std::min(nbytes_to_4k_boundary, curr_nbytes);
+            nbeats = (nbytes_this_transfer+63)/64;//number of 64B beats in transfer
+            logger << log_level::debug << "Read continue addr=" << curr_addr << " len=" << nbytes_this_transfer << " (" << nbeats << ")" << endl;
+            //set up bus to transfer one 64-byte word at a time
+            dut->write(datamem.arsize(), 6);//64B
+            dut->write(datamem.arlen(), nbeats-1);
+            dut->write(datamem.arburst(), 1);//INCR
+            dut->write<64>(datamem.araddr(), curr_addr);
+            dut->set(datamem.arvalid());
+            if(dut->test(datamem.arready())){
+                state = CLEAR_ADDR;
+            } else {
+                state = READY_ADDR;
+            }
+            curr_addr += nbytes_this_transfer;
+            curr_nbytes -= nbytes_this_transfer;
             return;
         case READY_ADDR:
             if(dut->test(datamem.arready())){
@@ -124,13 +155,20 @@ void data_read_fsm(XSI_DUT *dut, Stream<ap_uint<64> > &addr, Stream<ap_uint<512>
             return;
         case READY_DATA:
             if(dut->test(datamem.rvalid())){
+                nbeats--;
                 ret.Push(dut->read<512>(datamem.rdata()));
-                state = CLEAR_DATA;
+                if(nbeats == 0){
+                    state = CLEAR_DATA;
+                }
             }
             return;
         case CLEAR_DATA:
             dut->clear(datamem.rready());
-            state = VALID_ADDR;
+            if(curr_nbytes == 0){
+                state = VALID_ADDR;
+            } else {
+                state = CONTINUE_ADDR;
+            }
             return;
     }
 }
@@ -201,17 +239,26 @@ void control_write_fsm(XSI_DUT *dut, Stream<unsigned int> &addr, Stream<unsigned
     }
 }
 
-void data_write_fsm(XSI_DUT *dut, Stream<ap_uint<64> > &addr, Stream<ap_uint<512> > &val, Stream<ap_uint<64> > &strb){
+void data_write_fsm(XSI_DUT *dut, Stream<ap_uint<64> > &addr, Stream<ap_uint<32> > &len, Stream<ap_uint<512> > &val, Stream<ap_uint<64> > &strb){
     static axi_fsm_state state = VALID_ADDR;
+    static ap_uint<64> curr_addr = 0;
+    static unsigned int curr_nbytes = 0;
+    static ap_uint<8> nbeats = 0;
+    unsigned int nbytes_to_4k_boundary, nbytes_this_transfer;
     switch(state){
         case VALID_ADDR:
-            dut->write(datamem.awsize(), 6);//64B width
-            dut->write(datamem.awlen(), 0);//one word
-            dut->write(datamem.awburst(), 1);//INCR
-            dut->write(datamem.wlast(), 1);//always last transfer
             //set awaddr = addr
             if(!addr.IsEmpty()){
-                dut->write<64>(datamem.awaddr(), addr.Pop());
+                curr_addr = addr.Pop();
+                curr_nbytes = len.Pop();
+                nbytes_to_4k_boundary = (curr_addr/4096+1)*4096 - curr_addr;
+                nbytes_this_transfer = std::min(nbytes_to_4k_boundary, curr_nbytes);
+                nbeats = (nbytes_this_transfer+63)/64;//number of 64B beats in transfer
+                logger << log_level::debug << "Write start addr=" << curr_addr << " len=" << nbytes_this_transfer << " (" << nbeats << ")" << endl;
+                dut->write(datamem.awsize(), 6);//64B width
+                dut->write(datamem.awlen(), nbeats-1); 
+                dut->write(datamem.awburst(), 1);//INCR
+                dut->write<64>(datamem.awaddr(), curr_addr);
                 //set awvalid = 1
                 dut->set(datamem.awvalid());
                 if(dut->test(datamem.awready())){
@@ -219,7 +266,28 @@ void data_write_fsm(XSI_DUT *dut, Stream<ap_uint<64> > &addr, Stream<ap_uint<512
                 } else{
                     state = READY_ADDR;
                 }
+                curr_addr += nbytes_this_transfer;
+                curr_nbytes -= nbytes_this_transfer;
             }
+            return;
+        case CONTINUE_ADDR:
+            nbytes_to_4k_boundary = (curr_addr/4096+1)*4096 - curr_addr;
+            nbytes_this_transfer = std::min(nbytes_to_4k_boundary, curr_nbytes);
+            nbeats = (nbytes_this_transfer+63)/64;//number of 64B beats in transfer
+            logger << log_level::debug << "Write continue addr=" << curr_addr << " len=" << nbytes_this_transfer << " (" << nbeats << ")" << endl;
+            dut->write(datamem.awsize(), 6);//64B width
+            dut->write(datamem.awlen(), nbeats-1); 
+            dut->write(datamem.awburst(), 1);//INCR
+            dut->write<64>(datamem.awaddr(), curr_addr);
+            //set awvalid = 1
+            dut->set(datamem.awvalid());
+            if(dut->test(datamem.awready())){
+                state = CLEAR_ADDR;
+            } else{
+                state = READY_ADDR;
+            }
+            curr_addr += nbytes_this_transfer;
+            curr_nbytes -= nbytes_this_transfer;
             return;
         case READY_ADDR:
             if(dut->test(datamem.awready())){
@@ -234,10 +302,16 @@ void data_write_fsm(XSI_DUT *dut, Stream<ap_uint<64> > &addr, Stream<ap_uint<512
             if(!val.IsEmpty() && !strb.IsEmpty()){
                 dut->write<512>(datamem.wdata(), val.Pop());
                 dut->write<64>(datamem.wstrb(), strb.Pop());
+                dut->write(datamem.wlast(), nbeats==1);
                 //set wvalid = 1
                 dut->set(datamem.wvalid());
                 if(dut->test(datamem.wready())){
-                    state = CLEAR_DATA;
+                    nbeats--;
+                    if(nbeats != 0){
+                        state = UPDATE_DATA;
+                    } else {
+                        state = CLEAR_DATA;
+                    }
                 } else{
                     state = READY_DATA;
                 }
@@ -245,7 +319,29 @@ void data_write_fsm(XSI_DUT *dut, Stream<ap_uint<64> > &addr, Stream<ap_uint<512
             return;
         case READY_DATA:
             if(dut->test(datamem.wready())){
-                state = CLEAR_DATA;
+                nbeats--;
+                if(nbeats != 0){
+                    state = UPDATE_DATA;
+                } else {
+                    state = CLEAR_DATA;
+                }
+            }
+            return;
+        case UPDATE_DATA:
+            if(!val.IsEmpty() && !strb.IsEmpty()){
+                dut->write<512>(datamem.wdata(), val.Pop());
+                dut->write<64>(datamem.wstrb(), strb.Pop());
+                dut->write(datamem.wlast(), nbeats==1);
+                if(dut->test(datamem.wready())){
+                    nbeats--;
+                    if(nbeats != 0){
+                        state = UPDATE_DATA;
+                    } else {
+                        state = CLEAR_DATA;
+                    }
+                } else{
+                    state = READY_DATA;
+                }
             }
             return;
         case CLEAR_DATA:
@@ -267,7 +363,11 @@ void data_write_fsm(XSI_DUT *dut, Stream<ap_uint<64> > &addr, Stream<ap_uint<512
             return;
         case CLEAR_ACK:
             dut->clear(datamem.bready());
-            state = VALID_ADDR;
+            if(curr_nbytes == 0){
+                state = VALID_ADDR;
+            } else {
+                state = CONTINUE_ADDR;
+            }
             return;
     }
 }
@@ -420,18 +520,18 @@ void krnl_egress_fsm(XSI_DUT *dut, Stream<stream_word> &val){
 
 void interface_handler(XSI_DUT *dut, Stream<unsigned int> &axilite_rd_addr, Stream<unsigned int> &axilite_rd_data,
                         Stream<unsigned int> &axilite_wr_addr, Stream<unsigned int> &axilite_wr_data,
-                        Stream<ap_uint<64> > &aximm_rd_addr, Stream<ap_uint<512> > &aximm_rd_data,
-                        Stream<ap_uint<64> > &aximm_wr_addr, Stream<ap_uint<512> > &aximm_wr_data, Stream<ap_uint<64> > &aximm_wr_strb,
+                        Stream<ap_uint<64> > &aximm_rd_addr, Stream<ap_uint<32> > &aximm_rd_len, Stream<ap_uint<512> > &aximm_rd_data,
+                        Stream<ap_uint<64> > &aximm_wr_addr, Stream<ap_uint<32> > &aximm_wr_len, Stream<ap_uint<512> > &aximm_wr_data, Stream<ap_uint<64> > &aximm_wr_strb,
                         Stream<unsigned int> &callreq, Stream<unsigned int> &callack,
                         Stream<stream_word> &eth_tx_data, Stream<stream_word> &eth_rx_data,
                         Stream<stream_word> &cclo_to_krnl_data, Stream<stream_word> &krnl_to_cclo_data){
-    logger << log_level::info << "Starting XSI interface server" << endl;
+    logger << log_level::verbose << "Starting XSI interface server" << endl;
     while(!stop){
         dut->run_ncycles(1);
         control_read_fsm(dut, axilite_rd_addr, axilite_rd_data);
         control_write_fsm(dut, axilite_wr_addr, axilite_wr_data);
-        data_read_fsm(dut, aximm_rd_addr, aximm_rd_data);
-        data_write_fsm(dut, aximm_wr_addr, aximm_wr_data, aximm_wr_strb);
+        data_read_fsm(dut, aximm_rd_addr, aximm_rd_len, aximm_rd_data);
+        data_write_fsm(dut, aximm_wr_addr, aximm_wr_len, aximm_wr_data, aximm_wr_strb);
         call_req_fsm(dut, callreq);
         call_ack_fsm(dut, callack);
         eth_ingress_fsm(dut, eth_rx_data);
@@ -439,7 +539,7 @@ void interface_handler(XSI_DUT *dut, Stream<unsigned int> &axilite_rd_addr, Stre
         krnl_ingress_fsm(dut, krnl_to_cclo_data);
         krnl_egress_fsm(dut, cclo_to_krnl_data);
     }
-    logger << log_level::info << "Exiting XSI interface server" << endl;
+    logger << log_level::verbose << "Exiting XSI interface server" << endl;
 }
 
 //this function copies from the global var stop
@@ -485,7 +585,6 @@ int main(int argc, char **argv)
                                           false, 5500, "positive integer");
     cmd.add(startport);
 
-    TCLAP::SwitchArg udp_arg("u", "udp", "Use UDP hardware setup", cmd, false);
     TCLAP::SwitchArg loopback_arg("b", "loopback", "Enable kernel loopback", cmd, false);
     TCLAP::SwitchArg wave_en("w", "waveform", "Enable waveform recording", cmd, false);
 
@@ -496,7 +595,7 @@ int main(int argc, char **argv)
     }
 
     //set up the logger with the specified log level
-    logger = Log(static_cast<log_level>(loglevel.getValue()));
+    logger = Log(static_cast<log_level>(loglevel.getValue()), localrank.getValue());
 
     //get world size and local rank from environment
     unsigned int world_size = worldsize.getValue(); // number of processes
@@ -523,8 +622,10 @@ int main(int argc, char **argv)
     Stream<unsigned int> axilite_wr_addr;
     Stream<unsigned int> axilite_wr_data;
     Stream<ap_uint<64> > aximm_rd_addr;
+    Stream<ap_uint<32> > aximm_rd_len;
     Stream<ap_uint<512> > aximm_rd_data;
     Stream<ap_uint<64> > aximm_wr_addr;
+    Stream<ap_uint<32> > aximm_wr_len;
     Stream<ap_uint<512> > aximm_wr_data;
     Stream<ap_uint<64> > aximm_wr_strb;
     Stream<unsigned int, 16> callreq; //need some capacity for all args
@@ -553,19 +654,19 @@ int main(int argc, char **argv)
         HLSLIB_DATAFLOW_FUNCTION(interface_handler, &dut,
                                     axilite_rd_addr, axilite_rd_data,
                                     axilite_wr_addr, axilite_wr_data,
-                                    aximm_rd_addr, aximm_rd_data,
-                                    aximm_wr_addr, aximm_wr_data, aximm_wr_strb,
+                                    aximm_rd_addr, aximm_rd_len, aximm_rd_data,
+                                    aximm_wr_addr, aximm_wr_len, aximm_wr_data, aximm_wr_strb,
                                     callreq, callack,
                                     eth_tx_data, eth_rx_data,
                                     cclo_to_krnl_data, krnl_to_cclo_data);
         HLSLIB_DATAFLOW_FUNCTION(zmq_cmd_server,  &ctx,
                                     axilite_rd_addr, axilite_rd_data,
                                     axilite_wr_addr, axilite_wr_data,
-                                    aximm_rd_addr, aximm_rd_data,
-                                    aximm_wr_addr, aximm_wr_data, aximm_wr_strb,
+                                    aximm_rd_addr, aximm_rd_len, aximm_rd_data,
+                                    aximm_wr_addr, aximm_wr_len, aximm_wr_data, aximm_wr_strb,
                                     callreq, callack);
         //ZMQ to other nodes process(es)
-        HLSLIB_DATAFLOW_FUNCTION(zmq_eth_egress_server, &ctx, eth_tx_data, local_rank, !udp_arg.getValue());
+        HLSLIB_DATAFLOW_FUNCTION(zmq_eth_egress_server, &ctx, eth_tx_data, local_rank);
         HLSLIB_DATAFLOW_FUNCTION(zmq_eth_ingress_server, &ctx, eth_rx_data);
         HLSLIB_DATAFLOW_FUNCTION(zmq_krnl_egress_server, &ctx, cclo_to_krnl_data);
         HLSLIB_DATAFLOW_FUNCTION(zmq_krnl_ingress_server, &ctx, krnl_to_cclo_data);

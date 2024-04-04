@@ -23,7 +23,8 @@ EN_ARITH ?= 1
 EN_COMPRESS ?= 1
 EN_EXT_KRNL ?= 1
 MB_DEBUG_LEVEL ?= 0
-SIM_MEMSIZE ?= 256K
+SIM_MEM_SIZE_LOG ?= 28
+SIM_MEM_LATENCY ?= 50
 CCLO_ELF=vitis_ws/ccl_offload_control/Debug/ccl_offload_control.elf
 CCLO_SIMDLL=ccl_offload_ex/ccl_offload_ex.sim/sim_1/behav/xsim/xsim.dir/ccl_offload_behav/xsimk.so
 CCLO_XSA=ccl_offload_ex/ccl_offload.xsa
@@ -38,10 +39,15 @@ else ifeq (u280,$(findstring u280, $(PLATFORM)))
 	FPGAPART=xcu280-fsvh2892-2L-e
 else ifeq (u55c,$(findstring u55c, $(PLATFORM)))
 	FPGAPART=xcu55c-fsvh2892-2L-e
+else ifeq (u200,$(findstring u200, $(PLATFORM)))
+	FPGAPART=xcu200-fsgd2104-2-e
+else ifeq (u50,$(findstring u50, $(PLATFORM)))
+	FPGAPART=xcu50-fsvh2104-2-e
 else
 	$(error Unsupported PLATFORM)
 endif
 
+COMMIT_HASH := 0x$(shell git rev-parse HEAD | cut -c 1-6)
 GEN_KERNEL_TCL := tcl/generate_kernel.tcl
 REBUILD_BD_TCL := tcl/rebuild_bd.tcl tcl/control_bd.tcl tcl/rx_bd.tcl tcl/tx_bd.tcl
 
@@ -52,7 +58,7 @@ xsa: $(CCLO_XSA)
 
 $(CCLO_XSA): $(GEN_KERNEL_TCL) $(REBUILD_BD_TCL)
 	$(MAKE) -C hls/ DEVICE=$(FPGAPART)
-	vivado -mode batch -source $< -tclargs $(FPGAPART) $(HW_DEBUG) $(CCLO_XSA) $(STACK_TYPE) $(EN_DMA) $(EN_ARITH) $(EN_COMPRESS) $(EN_EXT_KRNL) $(MB_DEBUG_LEVEL)
+	vivado -mode batch -source $< -tclargs $(FPGAPART) $(HW_DEBUG) $(CCLO_XSA) $(STACK_TYPE) $(EN_DMA) $(EN_ARITH) $(EN_COMPRESS) $(EN_EXT_KRNL) $(MB_DEBUG_LEVEL) $(COMMIT_HASH)
 
 OPTIMIZATION=3
 #valid values 0,1,2,3,s,g
@@ -80,8 +86,8 @@ $(CCLO_ELF): tcl/generate_sw.tcl tcl/associate_elf.tcl $(FW_SOURCES) $(CCLO_XSA)
 simdll: $(CCLO_SIMDLL)
 
 $(CCLO_SIMDLL): tcl/generate_sim.tcl elf
-	$(MAKE) -C ../plugins PLATFORM=$(PLATFORM)
-	vivado -mode batch -source $< -tclargs $(STACK_TYPE) $(EN_DMA) $(EN_ARITH) $(EN_COMPRESS) $(EN_EXT_KRNL) $(SIM_MEMSIZE)
+	$(MAKE) -C ../plugins PLATFORM=$(PLATFORM) NUM_EXTDMA_AXI=2
+	vivado -mode batch -source $< -tclargs $(STACK_TYPE) $(EN_DMA) $(EN_ARITH) $(EN_COMPRESS) $(EN_EXT_KRNL) $(SIM_MEM_SIZE_LOG) $(SIM_MEM_LATENCY)
 	cd ccl_offload_ex/ccl_offload_ex.sim/sim_1/behav/xsim/ && ./compile.sh && ./elaborate.sh
 
 dcp: $(CCLO_DCP)

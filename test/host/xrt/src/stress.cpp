@@ -24,8 +24,8 @@
 TEST_F(ACCLTest, test_stress_sndrcv) {
   unsigned int count = options.count;
   auto buf = accl->create_buffer<float>(count, dataType::float32);
-  int next_rank = (rank + 1) % size;
-  int prev_rank = (rank + size - 1) % size;
+  int next_rank = (::rank + 1) % ::size;
+  int prev_rank = (::rank + ::size - 1) % ::size;
   for(unsigned int i=0; i<2000; i++) {
     accl->send(*buf, count, next_rank, 0, 0, true);
     accl->recv(*buf, count, prev_rank, 0, 0, true);
@@ -57,7 +57,6 @@ options_t parse_options(int argc, char *argv[]) {
                              false);
   TCLAP::SwitchArg udp_arg("u", "udp", "Use UDP hardware setup", cmd, false);
   TCLAP::SwitchArg tcp_arg("t", "tcp", "Use TCP hardware setup", cmd, false);
-  TCLAP::SwitchArg roce_arg("r", "roce", "Use RoCE hardware setup", cmd, false);
   TCLAP::ValueArg<std::string> xclbin_arg(
       "x", "xclbin", "xclbin of accl driver if hardware mode is used", false,
       "accl.xclbin", "file");
@@ -74,14 +73,13 @@ options_t parse_options(int argc, char *argv[]) {
   try {
     cmd.parse(argc, argv);
     if (hardware_arg.getValue()) {
-      if (axis3_arg.getValue() + udp_arg.getValue() + tcp_arg.getValue() +
-              roce_arg.getValue() != 1) {
-        throw std::runtime_error("When using hardware, specify one of axis3, "
-                                 "tcp, udp, or roce mode, but not both.");
+      if (axis3_arg.getValue() + udp_arg.getValue() + tcp_arg.getValue() != 1) {
+        throw std::runtime_error("When using hardware, specify exactly one of axis3, "
+                                 "tcp, or udp modes.");
       }
     }
   } catch (std::exception &e) {
-    if (rank == 0) {
+    if (::rank == 0) {
       std::cout << "Error: " << e.what() << std::endl;
     }
 
@@ -100,7 +98,6 @@ options_t parse_options(int argc, char *argv[]) {
   opts.axis3 = axis3_arg.getValue();
   opts.udp = udp_arg.getValue();
   opts.tcp = tcp_arg.getValue();
-  opts.roce = roce_arg.getValue();
   opts.device_index = device_index_arg.getValue();
   opts.xclbin = xclbin_arg.getValue();
   opts.test_xrt_simulator = xrt_simulator_ready(opts);
@@ -113,8 +110,8 @@ int main(int argc, char *argv[]) {
 
   MPI_Init(&argc, &argv);
 
-  MPI_Comm_rank(MPI_COMM_WORLD, &rank);
-  MPI_Comm_size(MPI_COMM_WORLD, &size);
+  MPI_Comm_rank(MPI_COMM_WORLD, &::rank);
+  MPI_Comm_size(MPI_COMM_WORLD, &::size);
 
   //init google test with any arguments specific to it
   ::testing::InitGoogleTest(&argc, argv);

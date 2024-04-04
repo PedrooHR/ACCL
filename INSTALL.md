@@ -23,22 +23,26 @@ sudo apt --fix-broken install
 
 ```sh
 source <VITIS_INSTALL>/settings64.sh
-cd "test/hardware"
+cd "test/refdesigns"
 make MODE=<Build Mode> PLATFORM=<Platform Name>
 ```
 
 The following build modes are supported:
 | Build Mode | Description                              |
 |------------|------------------------------------------|
-| udp or tcp | One ACCL instance per FPGA, with UDP or TCP transport respectively, via Ethernet port 0 |
+| udp or tcp | One ACCL instance per FPGA, with UDP or TCP transport respectively, via Ethernet port 0 on XRT shell |
+| coyote_tcp | One ACCL instance deployed to a Coyote shell over TCP |
+| coyote_rdma | One ACCL instance deployed to a Coyote shell over RDMA, with rendezvous mode support |
 | axis3x     | Three ACCL instances connected together internally on a single FPGA, using an AXI-Stream switch. Used for testing (see below) |
 
 The following platforms are supported for Alveo boards:
 | Alveo | Platform Name                          |
 |-------|----------------------------------------|
+| U50   | xilinx_u50_gen3x16_xdma_5_202210_1     |
 | U55C  | xilinx_u55c_gen3x16_xdma_3_202210_1    |
-| U250  | xilinx_u250_gen3x16_xdma_3_1_202020_1  |
-| U280  | xilinx_u280_xdma_201920_3              |
+| U200  | xilinx_u200_gen3x16_xdma_2_202110_1    |
+| U250  | xilinx_u250_gen3x16_xdma_4_1_202210_1  |
+| U280  | xilinx_u280_gen3x16_xdma_1_202211_1    |
 
 ## Run ACCL tests
 ### Emulation or simulation tests of host-launched collectives
@@ -61,7 +65,7 @@ First start up either the emulator or simulator:
   cd "kernels/cclo"
   source <VIVADO_INSTALL>/settings64.sh
   make STACK_TYPE=TCP EN_FANIN=1 simdll
-  cd "../../test/model/simulation"
+  cd "../../test/model/simulator"
   source <VITIS_INSTALL>/settings64.sh
   /bin/cmake .
   python3 run.py -n <RANKS>

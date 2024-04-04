@@ -30,8 +30,6 @@ using namespace ACCL;
 namespace fs = std::filesystem;
 
 namespace {
-// RoCE uses /19 subnet (255.255.224.0)
-const uint32_t ROCE_SUBNET = 0xFFFFE000;
 
 /**
  * Insert barrier when using MPI, otherwise sleep for 3 seconds.
@@ -193,9 +191,9 @@ void configure_vnx(vnx::CMAC &cmac, vnx::Networklayer &network_layer,
   }
 }
 
-void configure_tcp(BaseBuffer &tx_buf_network, BaseBuffer &rx_buf_network,
-                   xrt::kernel &network_krnl, const std::vector<rank_t> &ranks,
-                   int local_rank) {
+void configure_tcp(FPGABuffer<int8_t> &tx_buf_network, FPGABuffer<int8_t> &rx_buf_network,
+                   xrt::kernel &network_krnl, xrt::kernel &session_krnl,
+                   const std::vector<rank_t> &ranks, int local_rank) {
   tx_buf_network.sync_to_device();
   rx_buf_network.sync_to_device();
 
@@ -212,47 +210,26 @@ void configure_tcp(BaseBuffer &tx_buf_network, BaseBuffer &rx_buf_network,
   ss << std::hex << "ip_reg: " << ip_reg << " board_reg IP: " << board_reg
      << std::dec << std::endl;
   log_debug(ss.str());
-}
 
-void configure_roce(roce::CMAC &cmac, roce::Hivenet &hivenet,
-                    const std::vector<rank_t> &ranks, int local_rank,
-                    bool rsfec) {
-  uint32_t subnet_e = ip_encode(ranks[local_rank].ip) & ROCE_SUBNET;
-  std::string subnet = ip_decode(subnet_e);
-  uint32_t local_id = hivenet.get_local_id();
-  std::string internal_ip = ip_decode(subnet_e + local_id);
-
-  if (ranks[local_rank].ip != internal_ip) {
-    throw std::runtime_error(
-        "IP address set (" + ranks[local_rank].ip + ") mismatches with " +
-        "internal hivenet IP (" + internal_ip + "). The internal ip is " +
-        "determined by adding the rank (" + std::to_string(local_rank) +
-        ") to the subnet (" + subnet + ").");
+  //set up sessions for ranks
+  for(size_t i = 0; i < ranks.size(); ++i){
+    bool success;
+    if (i == static_cast<size_t>(local_rank)) {
+      continue;
+    }
+    session_krnl(ranks[i].ip, ranks[i].port, false, 	
+                  &(ranks[i].session_id), &success);
+    if(!success){
+      throw std::runtime_error("Failed to establish session for IP:"+
+                                ranks[i].ip+
+                                " port: "+
+                                std::to_string(ranks[i].port));
+    }
+    std::ostringstream ss;
+    ss << "Established session ID: " << ranks[i].session_id << std::endl;
+    log_debug(ss.str());
   }
 
-  hivenet.set_ip_subnet(subnet);
-  hivenet.set_mac_subnet(0x347844332211);
-
-  if (cmac.get_rs_fec() != rsfec) {
-    std::cout << "Turning RS-FEC " << (rsfec ? "on" : "off") << "..."
-              << std::endl;
-    cmac.set_rs_fec(rsfec);
-  }
-
-  std::cout << "Testing RoCE link status: ";
-  barrier();
-  const auto link_status = cmac.link_status();
-
-  if (link_status.at("rx_status")) {
-    std::cout << "Link successful!" << std::endl;
-  } else {
-    std::cout << "No link found." << std::endl;
-  }
-
-  if (!link_status.at("rx_status")) {
-    throw network_error("No link on ethernet.");
-  }
-  barrier();
 }
 
 std::vector<std::string> get_ips(fs::path config_file) {
@@ -287,24 +264,12 @@ std::vector<std::string> get_ips(bool local, int world_size) {
 
 std::vector<rank_t> generate_ranks(fs::path config_file, int local_rank,
                                    std::uint16_t start_port,
-                                   unsigned int rxbuf_size, bool roce) {
+                                   unsigned int rxbuf_size) {
   std::vector<rank_t> ranks{};
   std::vector<std::string> ips = get_ips(config_file);
 
-  uint32_t ip_subnet;
-  if (roce) {
-    ip_subnet = ip_encode(ips.at(0)) & ROCE_SUBNET;
-  }
-
   for (int i = 0; i < static_cast<int>(ips.size()); ++i) {
-    int session_id;
-    if (roce) {
-      session_id = ip_encode(ips[i]) - ip_subnet;
-    } else {
-      session_id = i;
-    }
-
-    rank_t new_rank = {ips[i], start_port + i, session_id, rxbuf_size};
+    rank_t new_rank = {ips[i], start_port + i, i, rxbuf_size};
     ranks.emplace_back(new_rank);
   }
 
@@ -330,7 +295,6 @@ initialize_accl(const std::vector<rank_t> &ranks, int local_rank,
                 fs::path xclbin, int nbufs, addr_t bufsize, addr_t segsize,
                 bool rsfec) {
   std::size_t world_size = ranks.size();
-  networkProtocol protocol;
   std::unique_ptr<ACCL::ACCL> accl;
 
   if (segsize == 0) {
@@ -338,15 +302,7 @@ initialize_accl(const std::vector<rank_t> &ranks, int local_rank,
   }
 
   if (simulator) {
-    if (design == acclDesign::UDP) {
-      protocol = networkProtocol::UDP;
-    } else {
-      protocol = networkProtocol::TCP;
-    }
-
-    accl =
-        std::make_unique<ACCL::ACCL>(ranks, local_rank, ranks[0].port, device,
-                                     protocol, nbufs, bufsize, segsize);
+    accl = std::make_unique<ACCL::ACCL>(ranks[0].port, local_rank);
   } else {
     int devicemem;
     std::vector<int> rxbufmem;
@@ -370,20 +326,10 @@ initialize_accl(const std::vector<rank_t> &ranks, int local_rank,
       devicemem = local_rank * 6;
       rxbufmem = {local_rank * 6 + 1};
       networkmem = local_rank * 6 + 2;
-    } else if (design == acclDesign::ROCE) {
-      devicemem = 3;
-      rxbufmem = {4};
-      networkmem = 6;
     } else {
       devicemem = 0;
       rxbufmem = {1};
       networkmem = 6;
-    }
-
-    if (design == acclDesign::UDP || design == acclDesign::AXIS3x) {
-      protocol = networkProtocol::UDP;
-    } else {
-      protocol = networkProtocol::TCP;
     }
 
     if (design == acclDesign::UDP) {
@@ -403,29 +349,16 @@ initialize_accl(const std::vector<rank_t> &ranks, int local_rank,
       auto network_krnl =
           xrt::kernel(device, xclbin_uuid, "network_krnl:{network_krnl_0}",
                       xrt::kernel::cu_access_mode::exclusive);
-      configure_tcp(*tx_buf_network, *rx_buf_network, network_krnl, ranks,
-                    local_rank);
-    } else if (design == acclDesign::ROCE) {
-      auto cmac = roce::CMAC(xrt::ip(device, xclbin_uuid, "cmac_0:{cmac_0}"));
-      auto hivenet = roce::Hivenet(
-          xrt::ip(device, xclbin_uuid, "HiveNet_kernel_0:{networklayer_0}"),
-          ranks[local_rank].session_id);
-
-      configure_roce(cmac, hivenet, ranks, local_rank, rsfec);
+      auto session_krnl =
+          xrt::kernel(device, xclbin_uuid, "tcp_session_handler:{session_handler_0}",
+                      xrt::kernel::cu_access_mode::exclusive);
+      configure_tcp(*tx_buf_network, *rx_buf_network, network_krnl, session_krnl,
+                     ranks, local_rank);
     }
 
-    accl = std::make_unique<ACCL::ACCL>(ranks, local_rank, device, cclo_ip,
-                                        hostctrl_ip, devicemem, rxbufmem,
-                                        protocol, nbufs, bufsize, segsize);
+    accl = std::make_unique<ACCL::ACCL>(device, cclo_ip, hostctrl_ip, devicemem, rxbufmem);
   }
-
-  if (protocol == networkProtocol::TCP) {
-    barrier();
-    accl->open_port();
-    pause_barrier();
-    accl->open_con();
-  }
-
+  accl.get()->initialize(ranks, local_rank,	nbufs, bufsize, segsize);
   return accl;
 }
 } // namespace accl_network_utils
