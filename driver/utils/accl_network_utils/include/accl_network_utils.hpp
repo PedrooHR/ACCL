@@ -18,7 +18,7 @@
 
 #include <accl.hpp>
 #include <cstdint>
-#include <filesystem>
+#include <experimental/filesystem>
 #include <memory>
 #include <roce/cmac.hpp>
 #include <roce/hivenet.hpp>
@@ -43,7 +43,7 @@ class network_error : public std::runtime_error {
 // The roce parameter is used to set the session id to be int(ip) - int(subnet),
 // because the roce kernel constructs the IP internally by adding the session
 // id to the IP subnet
-std::vector<ACCL::rank_t> generate_ranks(std::filesystem::path config_file,
+std::vector<ACCL::rank_t> generate_ranks(std::experimental::filesystem::path config_file,
                                          int local_rank,
                                          std::uint16_t start_port = 5500,
                                          unsigned int rxbuf_size = 1024,
@@ -60,7 +60,7 @@ std::unique_ptr<ACCL::ACCL>
 initialize_accl(const std::vector<ACCL::rank_t> &ranks, int local_rank,
                 bool simulator, acclDesign design,
                 xrt::device device = xrt::device(),
-                std::filesystem::path xclbin = "", int nbufs = 16,
+                std::experimental::filesystem::path xclbin = "", int nbufs = 16,
                 ACCL::addr_t bufsize = 1024, ACCL::addr_t segsize = 0,
                 bool rsfec = false);
 
@@ -80,7 +80,7 @@ void configure_roce(roce::CMAC &cmac, roce::Hivenet &hivenet,
                     bool rsfec = false);
 
 // Get IPs from config file, this function is called by generate_ranks
-std::vector<std::string> get_ips(std::filesystem::path config_file);
+std::vector<std::string> get_ips(std::experimental::filesystem::path config_file);
 // Generate IPs in private subnet, this function is called by generate_ranks
 std::vector<std::string> get_ips(bool local, int world_size);
 } // namespace accl_network_utils

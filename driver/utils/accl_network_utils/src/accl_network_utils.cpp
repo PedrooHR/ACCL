@@ -27,7 +27,7 @@
 #include "accl_network_utils.hpp"
 
 using namespace ACCL;
-namespace fs = std::filesystem;
+namespace fs = std::experimental::filesystem;
 
 namespace {
 // RoCE uses /19 subnet (255.255.224.0)
@@ -145,22 +145,27 @@ void configure_vnx(vnx::CMAC &cmac, vnx::Networklayer &network_layer,
 
   std::cout << "Testing UDP link status: ";
 
-  const auto link_status = cmac.link_status();
-
-  if (link_status.at("rx_status")) {
-    std::cout << "Link successful!" << std::endl;
+  std::map<std::string, bool> status;
+  for (std::size_t i = 0; i < 5; ++i) {
+    status = cmac.link_status();
+    auto link_status = status["rx_status"];
+    if (link_status) {
+      std::cout << "Link successful!" << std::endl;
+      break;
+    }
+    std::this_thread::sleep_for(std::chrono::seconds(1));
   }
 
   std::ostringstream ss;
 
   ss << "Link interface 1 : {";
-  for (const auto &elem : link_status) {
+  for (const auto &elem : status) {
     ss << elem.first << ": " << elem.second << ", ";
   }
   ss << "}" << std::endl;
   log_debug(ss.str());
 
-  if (!link_status.at("rx_status")) {
+  if (!status.at("rx_status")) {
     throw network_error("No link found.");
   }
 
